@@ -1,0 +1,1 @@
+app_bot.add_handler(MessageHandler(filters.VIDEO, handle_video))
